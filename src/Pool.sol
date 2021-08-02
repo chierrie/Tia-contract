@@ -35,6 +35,8 @@ contract Pool is Operator, ReentrancyGuard, IPool {
 
     mapping(address => uint256) public last_redeemed;
 
+    mapping(address => uint256) public last_redeemed_time;
+
     // Constants for various precisions
     uint256 private constant PRICE_PRECISION = 1e6;
     uint256 private constant COLLATERAL_RATIO_PRECISION = 1e6;
@@ -43,11 +45,27 @@ contract Pool is Operator, ReentrancyGuard, IPool {
     // Number of decimals needed to get to 18
     uint256 private missing_decimals;
 
+    // Unit of token redeemed within 24 hours from "daily_redemption_start"
+    uint256 private daily_redemption_count;
+
+    // the timestamp the 24 hours count started
+    uint256 private daily_redemption_start;
+
     // Pool_ceiling is the total units of collateral that a pool contract can hold
     uint256 public pool_ceiling = 0;
 
     // Number of blocks to wait before being able to collectRedemption()
     uint256 public redemption_delay = 1;
+
+    // the unit of token needed to be redeemed within 24 hours
+    uint256 public daily_redemption_limit;
+
+    // Maximum amount of token address can redeem in "redemption_locktime"
+    uint256 public user_redemption_limit;
+
+    // Duration of timelock per address
+    uint256 public redemption_locktime = 1 hours;
+    
 
     // AccessControl state variables
     bool public mint_paused = false;
@@ -81,6 +99,7 @@ contract Pool is Operator, ReentrancyGuard, IPool {
         treasury = _treasury;
         pool_ceiling = _pool_ceiling;
         missing_decimals = uint256(18).sub(ERC20(_collateral).decimals());
+        daily_redemption_start = block.timestamp;
     }
 
     /* ========== VIEWS ========== */
@@ -165,6 +184,15 @@ contract Pool is Operator, ReentrancyGuard, IPool {
         uint256 _collateral_out_min
     ) external notMigrated {
         require(redeem_paused == false, "Redeeming is paused");
+        require((block.timestamp.sub(last_redeemed_time[msg.sender])) > user_redemption_limit, "<user_redemption_limit");
+
+        if(block.timestamp.sub(daily_redemption_start) > 24 hours){
+            daily_redemption_count = 0;
+            daily_redemption_start = block.timestamp;
+        }
+
+        require(daily_redemption_count < daily_redemption_limit, ">daily_redemption_limit");
+
         (, uint256 _share_price, , , uint256 _effective_collateral_ratio, , , uint256 _redemption_fee) = ITreasury(treasury).info();
         uint256 _collateral_price = getCollateralPrice();
         uint256 _dollar_amount_post_fee = _dollar_amount.sub((_dollar_amount.mul(_redemption_fee)).div(PRICE_PRECISION));
@@ -196,6 +224,9 @@ contract Pool is Operator, ReentrancyGuard, IPool {
         }
 
         last_redeemed[msg.sender] = block.number;
+        last_redeemed_time[msg.sender] = block.timestamp;
+
+        daily_redemption_count = daily_redemption_count.add(_dollar_amount);
 
         // Move all external functions to the end
         IDollar(dollar).poolBurnFrom(msg.sender, _dollar_amount);
@@ -237,6 +268,12 @@ contract Pool is Operator, ReentrancyGuard, IPool {
         }
     }
 
+    function resetDailyLimit() external {
+        require(block.timestamp.sub(daily_redemption_start) > 24 hours, "< 24 hours");
+        daily_redemption_count = 0;
+        daily_redemption_start = block.timestamp;
+    }
+
     /* ========== RESTRICTED FUNCTIONS ========== */
 
     // move collateral to new pool address
@@ -264,6 +301,18 @@ contract Pool is Operator, ReentrancyGuard, IPool {
 
     function setRedemptionDelay(uint256 _redemption_delay) external onlyOperator {
         redemption_delay = _redemption_delay;
+    }
+
+    function setUserRedemptionLimit(uint256 _user_redemption_limit) external onlyOperator {
+        user_redemption_limit = _user_redemption_limit;
+    }
+
+    function setRedemptionTimeLock(uint256 _redemption_locktime) external onlyOperator {
+        redemption_locktime = _redemption_locktime;
+    }
+
+    function setDailyRedemptionLimit(uint256 _daily_redemption_limit) external onlyOperator {
+        daily_redemption_limit = _daily_redemption_limit;
     }
 
     function setTreasury(address _treasury) external onlyOperator {
